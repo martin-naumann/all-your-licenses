@@ -3,9 +3,10 @@ require 'mechanize'
 require 'gemnasium/parser'
 require 'trollop'
 require 'net/http'
+require 'json'
 
 opts = Trollop::options do
-  opt :gemfile, "Path to the Gemfile", :type => :string
+  opt :filepath, "Path to the dependency definitions (Gemfile or package.json)", :type => :string
   opt :summary, "Get a summary of licenses found", :type => :boolean, :default => false
 end
 
@@ -42,43 +43,74 @@ def jump_hoops_for_the_license_of(gem)
 
 end
 
+def get_license_for_npm_module(module_name)
+  agent = Mechanize.new
+  license = agent.get("https://npmjs.org/bower").search("//tr[th//text()[contains(., 'License')]]/td")[0].content.strip
+
+  return (license.empty? ? "n/A" : license)
+
+end
+
+$license_count = 0
+$licenses      = {}
+$num_deps      = 0
+
+def count_license(dependency_name, license_name)
+  puts "#{dependency_name}: #{license_name}"
+  if license_name != "n/A"
+    $license_count = $license_count + 1
+    $licenses[license_name] = if $licenses[license_name]
+                                $licenses[license_name] + 1
+                              else
+                                $licenses[license_name] = 1
+                              end
+  end
+end
+
+def parse_gemfile(gemfile)
+  gemfile.dependencies.each do |dependency|
+    license = find_license_for_gem(dependency.name)
+
+    if license != "n/A"
+      count_license(dependency.name, license)
+    else
+      begin
+        license = jump_hoops_for_the_license_of(dependency.name)
+        count_license(dependency.name, license)
+      rescue => e
+      end
+    end
+  end
+end
+
+def parse_npm_deps(json)
+  $num_deps = json["dependencies"].keys.count
+  json["dependencies"].each_key do |dep|
+    license = get_license_for_npm_module(dep)
+    count_license(dep, license)
+  end
+end
+
 
 #######################
 # Let the games begin #
 #######################
 
 
-gemfile = Gemnasium::Parser.gemfile(File.read(opts[:gemfile]))
-
-$license_count = 0
-$licenses      = {}
-
-def count_license(gem_name, license_name)
-  puts "#{gem_name}: #{license_name}"
-  if license_name != "n/A"
-    $license_count = $license_count + 1
-    $licenses[license_name] = if $licenses[license_name]
-      $licenses[license_name] + 1
-    else
-      $licenses[license_name] = 1 
-    end
+if File.basename(opts[:filepath]) == "Gemfile"
+  gemfile = Gemnasium::Parser.gemfile(File.read(opts[:filepath]))
+  $num_deps = gemfile.dependencies.count
+  parse_gemfile(gemfile)
+else
+  begin
+    package_json = JSON.parse(File.read(opts[:filepath]))
+    parse_npm_deps(package_json)
+  rescue => e
+    puts "Can't parse JSON: #{e}"
   end
 end
 
-gemfile.dependencies.each do |dependency|
-  license = find_license_for_gem(dependency.name)
 
-  if license != "n/A"
-    count_license(dependency.name, license)
-  else
-    begin
-      license = jump_hoops_for_the_license_of(dependency.name)
-      count_license(dependency.name, license)
-    rescue => e
-    end
-  end
-end
-
-puts "found #{$license_count} from #{gemfile.dependencies.count} dependencies"
+puts "Found #{$license_count} licenses from #{$num_deps} dependencies"
 
 $licenses.each { |license, count| puts "#{license}: #{count}x" } if opts[:summary]
